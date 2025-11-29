@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// Config holds the server configuration.
 type Config struct {
 	Host    string
 	SSLHost string
@@ -27,7 +26,6 @@ type Config struct {
 	SSLKey  string
 }
 
-// DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		Host:    "",
@@ -42,7 +40,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-// ParseFlags parses command line flags into the config.
 func (c *Config) ParseFlags(args []string) error {
 	fs := flag.NewFlagSet("gomoose", flag.ContinueOnError)
 	fs.StringVar(&c.Host, "host", c.Host, "HTTP host to listen on")
@@ -57,25 +54,20 @@ func (c *Config) ParseFlags(args []string) error {
 	return fs.Parse(args)
 }
 
-// Validate validates the configuration and applies defaults.
 func (c *Config) Validate() error {
-	// If SSL flag is set but no port specified, default to 443
 	if c.SSLPort <= 0 && c.UseSSL {
 		c.SSLPort = 443
 	}
-	// Enable SSL if a port is specified (allows -sslport without -ssl)
 	c.UseSSL = c.SSLPort > 0
 	return nil
 }
 
-// Server represents the web server.
 type Server struct {
 	config     *Config
 	httpServer *http.Server
 	tlsServer  *http.Server
 }
 
-// NewServer creates a new server with the given configuration.
 func NewServer(config *Config) (*Server, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -83,7 +75,6 @@ func NewServer(config *Config) (*Server, error) {
 	return &Server{config: config}, nil
 }
 
-// Run starts the server and blocks until shutdown.
 func (s *Server) Run(ctx context.Context) error {
 	path, err := filepath.Abs(s.config.Dir)
 	if err != nil {
@@ -136,7 +127,6 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	// Wait for context cancellation or error
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down servers...")
@@ -150,7 +140,6 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown gracefully shuts down the servers.
 func (s *Server) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -181,7 +170,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

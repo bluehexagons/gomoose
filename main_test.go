@@ -263,7 +263,6 @@ func TestNewServer(t *testing.T) {
 }
 
 func TestServerRun(t *testing.T) {
-	// Create a temporary directory with a test file
 	tmpDir, err := os.MkdirTemp("", "gomoose-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -276,7 +275,6 @@ func TestServerRun(t *testing.T) {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	// Use a high port to avoid permission issues
 	port := 18080
 	config := &Config{
 		Host:   "127.0.0.1",
@@ -294,16 +292,13 @@ func TestServerRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start server in a goroutine
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- server.Run(ctx)
 	}()
 
-	// Wait for server to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Test HTTP request
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/index.html", port))
 	if err != nil {
 		cancel()
@@ -324,10 +319,8 @@ func TestServerRun(t *testing.T) {
 		t.Errorf("Expected body %q, got %q", testContent, string(body))
 	}
 
-	// Shutdown server
 	cancel()
 
-	// Wait for server to stop
 	select {
 	case err := <-serverDone:
 		if err != nil {
@@ -339,14 +332,12 @@ func TestServerRun(t *testing.T) {
 }
 
 func TestServerServesDirectory(t *testing.T) {
-	// Create a temporary directory with multiple files
 	tmpDir, err := os.MkdirTemp("", "gomoose-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create subdirectory and files
 	subDir := filepath.Join(tmpDir, "subdir")
 	if err := os.Mkdir(subDir, 0755); err != nil {
 		t.Fatalf("Failed to create subdir: %v", err)
@@ -383,12 +374,11 @@ func TestServerServesDirectory(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		server.Run(ctx)
+		_ = server.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
 
-	// Test each file
 	for path, expectedContent := range files {
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/%s", port, path))
@@ -440,7 +430,7 @@ func TestServer404(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		server.Run(ctx)
+		_ = server.Run(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
