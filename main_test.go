@@ -118,7 +118,10 @@ func TestServerRun(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read body: %v", err)
+	}
 	if string(body) != testContent {
 		t.Errorf("Expected body %q, got %q", testContent, string(body))
 	}
@@ -197,38 +200,55 @@ func TestServerBlocksPrivateKey(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	certPEM, keyPEM, _ := generateSelfSignedCert()
+	certPEM, keyPEM, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatalf("Failed to generate certs: %v", err)
+	}
 	certFile := filepath.Join(tmpDir, "cert.crt")
 	keyFile := filepath.Join(tmpDir, "cert.key")
-	os.WriteFile(certFile, certPEM, 0644)
-	os.WriteFile(keyFile, keyPEM, 0600)
-	os.WriteFile(filepath.Join(tmpDir, "regular.txt"), []byte("content"), 0644)
+	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+		t.Fatalf("Failed to write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		t.Fatalf("Failed to write key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "regular.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("Failed to write regular file: %v", err)
+	}
 
 	port := 18084
 	config := &Config{
 		Host:    "127.0.0.1",
 		Port:    port,
-		SSLPort: 0,
+		SSLPort: 18444,
 		Dir:     tmpDir,
 		SSLCert: certFile,
 		SSLKey:  keyFile,
 	}
-	config.SSLPort = 18444
 
-	server, _ := NewServer(config)
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = server.Run(ctx) }()
 	time.Sleep(200 * time.Millisecond)
 
-	resp, _ := http.Get(fmt.Sprintf("http://127.0.0.1:%d/regular.txt", port))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/regular.txt", port))
+	if err != nil {
+		t.Fatalf("HTTP GET error: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected regular file status 200, got %d", resp.StatusCode)
 	}
 
-	resp, _ = http.Get(fmt.Sprintf("http://127.0.0.1:%d/cert.key", port))
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/cert.key", port))
+	if err != nil {
+		t.Fatalf("HTTP GET error: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Expected key file to return 404, got %d", resp.StatusCode)
