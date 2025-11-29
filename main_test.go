@@ -572,6 +572,7 @@ func TestServerHTTPSWithGeneratedCert(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Create HTTP client that skips certificate verification
+	// InsecureSkipVerify is intentionally used here to test self-signed certificates
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
