@@ -1,0 +1,24 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+gomoose
+gomoose-*
+
+# Build outputs
+dist/
+
+# SSL certificates (users should generate their own)
+*.crt
+*.key
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
