@@ -29,8 +29,6 @@ type Config struct {
 	Port     int
 	SSLPort  int
 	NoHTTP   bool
-	UseSSL   bool
-	NoSSL    bool
 	Dir      string
 	SSLCert  string
 	SSLKey   string
@@ -44,8 +42,6 @@ func DefaultConfig() *Config {
 		Port:     80,
 		SSLPort:  443,
 		NoHTTP:   false,
-		UseSSL:   true,
-		NoSSL:    false,
 		Dir:      ".",
 		SSLCert:  "cert.crt",
 		SSLKey:   "cert.key",
@@ -55,28 +51,19 @@ func DefaultConfig() *Config {
 
 func (c *Config) ParseFlags(args []string) error {
 	fs := flag.NewFlagSet("gomoose", flag.ContinueOnError)
-	fs.StringVar(&c.Host, "host", c.Host, "HTTP host to listen on")
-	fs.StringVar(&c.SSLHost, "sslhost", c.SSLHost, "SSL host to listen on")
-	fs.IntVar(&c.Port, "port", c.Port, "HTTP port to listen on")
-	fs.IntVar(&c.SSLPort, "sslport", c.SSLPort, "SSL port to listen on (0 to disable SSL)")
-	fs.BoolVar(&c.NoHTTP, "nohttp", c.NoHTTP, "Disables HTTP")
-	fs.BoolVar(&c.NoSSL, "nossl", c.NoSSL, "Disables SSL (SSL is enabled by default)")
-	fs.StringVar(&c.SSLCert, "cert", c.SSLCert, "File to use as SSL cert (generated in memory if not found)")
-	fs.StringVar(&c.SSLKey, "key", c.SSLKey, "File to use as SSL key (generated in memory if not found)")
+	fs.StringVar(&c.Host, "host", c.Host, "HTTP host")
+	fs.StringVar(&c.SSLHost, "sslhost", c.SSLHost, "SSL host")
+	fs.IntVar(&c.Port, "port", c.Port, "HTTP port")
+	fs.IntVar(&c.SSLPort, "sslport", c.SSLPort, "SSL port (0 to disable)")
+	fs.BoolVar(&c.NoHTTP, "nohttp", c.NoHTTP, "Disable HTTP")
+	fs.StringVar(&c.SSLCert, "cert", c.SSLCert, "SSL certificate file")
+	fs.StringVar(&c.SSLKey, "key", c.SSLKey, "SSL key file")
 	fs.StringVar(&c.Dir, "dir", c.Dir, "Directory to serve")
-	fs.BoolVar(&c.SaveKeys, "savekeys", c.SaveKeys, "Save generated SSL cert and key files to disk")
+	fs.BoolVar(&c.SaveKeys, "savekeys", c.SaveKeys, "Save generated SSL files")
 	return fs.Parse(args)
 }
 
 func (c *Config) Validate() error {
-	// Handle --nossl flag
-	if c.NoSSL {
-		c.UseSSL = false
-		c.SSLPort = 0
-	} else {
-		// SSL is enabled by default
-		c.UseSSL = c.SSLPort > 0
-	}
 	return nil
 }
 
@@ -85,46 +72,38 @@ type Server struct {
 	httpServer  *http.Server
 	tlsServer   *http.Server
 	tlsConfig   *tls.Config
-	blockedFile string // Absolute path of private key file to block
+	blockedFile string
 }
 
-// generateSelfSignedCert generates a self-signed certificate and private key in memory
 func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
-	// Generate ECDSA private key
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
 
-	// Create certificate template
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
 	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"Gomoose Self-Signed"},
-		},
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{Organization: []string{"Gomoose"}},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour), // 1 year validity
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		DNSNames:              []string{"localhost"},
 	}
 
-	// Create certificate
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
 
-	// Encode certificate to PEM
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
-	// Encode private key to PEM
 	keyDER, err := x509.MarshalECPrivateKey(privateKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal private key: %w", err)
@@ -134,7 +113,6 @@ func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
 	return certPEM, keyPEM, nil
 }
 
-// protectedFileHandler wraps a file handler to block access to specific files
 func protectedFileHandler(handler http.Handler, blockedPath string, serverRoot string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if blockedPath == "" {
@@ -142,9 +120,7 @@ func protectedFileHandler(handler http.Handler, blockedPath string, serverRoot s
 			return
 		}
 
-		// Clean and resolve the request path against the server root
 		cleanPath := filepath.Clean(r.URL.Path)
-		// Remove leading slash and join with server root to get absolute path
 		if len(cleanPath) > 0 && cleanPath[0] == '/' {
 			cleanPath = cleanPath[1:]
 		}
@@ -155,7 +131,6 @@ func protectedFileHandler(handler http.Handler, blockedPath string, serverRoot s
 			return
 		}
 
-		// Block access if the requested path matches the blocked path exactly
 		if absRequestedPath == blockedPath {
 			http.NotFound(w, r)
 			return
@@ -179,15 +154,13 @@ func (s *Server) Run(ctx context.Context) error {
 
 	log.Println("Serving", path)
 
-	// Determine if we need to block the private key file
-	if s.config.UseSSL {
+	if s.config.SSLPort > 0 {
 		keyPath := s.config.SSLKey
 		if !filepath.IsAbs(keyPath) {
 			keyPath = filepath.Join(path, keyPath)
 		}
 		absKeyPath, err := filepath.Abs(keyPath)
 		if err == nil {
-			// Check if key file is within served directory using filepath.Rel
 			relPath, relErr := filepath.Rel(path, absKeyPath)
 			if relErr == nil && !strings.HasPrefix(relPath, "..") {
 				s.blockedFile = absKeyPath
@@ -221,17 +194,15 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	if s.config.UseSSL {
+	if s.config.SSLPort > 0 {
 		addr := fmt.Sprintf("%s:%d", s.config.SSLHost, s.config.SSLPort)
 
-		// Check if cert/key files exist
 		certExists := fileExists(s.config.SSLCert)
 		keyExists := fileExists(s.config.SSLKey)
 
 		var tlsConfig *tls.Config
 
 		if certExists && keyExists {
-			// Use existing cert/key files
 			cert, err := tls.LoadX509KeyPair(s.config.SSLCert, s.config.SSLKey)
 			if err != nil {
 				return fmt.Errorf("failed to load SSL certificates: %w", err)
@@ -242,8 +213,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			log.Printf("HTTPS listening on %s (cert: %s, key: %s)", addr, s.config.SSLCert, s.config.SSLKey)
 		} else {
-			// Generate self-signed certificate in memory
-			log.Println("SSL certificate files not found, generating self-signed certificate in memory...")
+			log.Println("Generating self-signed certificate...")
 			certPEM, keyPEM, err := generateSelfSignedCert()
 			if err != nil {
 				return fmt.Errorf("failed to generate self-signed certificate: %w", err)
@@ -258,7 +228,6 @@ func (s *Server) Run(ctx context.Context) error {
 				MinVersion:   tls.VersionTLS12,
 			}
 
-			// Save keys if requested
 			if s.config.SaveKeys {
 				if err := os.WriteFile(s.config.SSLCert, certPEM, 0644); err != nil {
 					log.Printf("Warning: failed to save certificate to %s: %v", s.config.SSLCert, err)
@@ -272,7 +241,7 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 			}
 
-			log.Printf("HTTPS listening on %s (using generated self-signed certificate)", addr)
+			log.Printf("HTTPS listening on %s (self-signed)", addr)
 		}
 
 		s.tlsConfig = tlsConfig
@@ -289,7 +258,6 @@ func (s *Server) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Use ListenAndServeTLS with empty strings since we configured TLSConfig
 			if err := s.tlsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("HTTPS server error: %w", err)
 			}
@@ -309,7 +277,6 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// fileExists checks if a file exists
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
