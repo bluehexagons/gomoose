@@ -135,11 +135,28 @@ func generateSelfSignedCert() (certPEM, keyPEM []byte, err error) {
 }
 
 // protectedFileHandler wraps a file handler to block access to specific files
-func protectedFileHandler(handler http.Handler, blockedPath string) http.Handler {
+func protectedFileHandler(handler http.Handler, blockedPath string, serverRoot string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Clean the URL path to prevent path traversal
+		if blockedPath == "" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+
+		// Clean and resolve the request path against the server root
 		cleanPath := filepath.Clean(r.URL.Path)
-		if blockedPath != "" && strings.HasSuffix(blockedPath, cleanPath) {
+		// Remove leading slash and join with server root to get absolute path
+		if len(cleanPath) > 0 && cleanPath[0] == '/' {
+			cleanPath = cleanPath[1:]
+		}
+		requestedPath := filepath.Join(serverRoot, cleanPath)
+		absRequestedPath, err := filepath.Abs(requestedPath)
+		if err != nil {
+			handler.ServeHTTP(w, r)
+			return
+		}
+
+		// Block access if the requested path matches the blocked path exactly
+		if absRequestedPath == blockedPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -169,13 +186,17 @@ func (s *Server) Run(ctx context.Context) error {
 			keyPath = filepath.Join(path, keyPath)
 		}
 		absKeyPath, err := filepath.Abs(keyPath)
-		if err == nil && strings.HasPrefix(absKeyPath, path) {
-			s.blockedFile = absKeyPath
+		if err == nil {
+			// Check if key file is within served directory using filepath.Rel
+			relPath, relErr := filepath.Rel(path, absKeyPath)
+			if relErr == nil && !strings.HasPrefix(relPath, "..") {
+				s.blockedFile = absKeyPath
+			}
 		}
 	}
 
 	baseHandler := http.FileServer(http.Dir(path))
-	handler := protectedFileHandler(baseHandler, s.blockedFile)
+	handler := protectedFileHandler(baseHandler, s.blockedFile, path)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 2)
