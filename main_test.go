@@ -130,7 +130,7 @@ func TestServerRun(t *testing.T) {
 	_, address := startTestServer(t, config, false)
 
 	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/index.html")
-	defer resp.Body.Close()
+	defer closeResource(t, resp.Body, "HTTP response body")
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -145,7 +145,7 @@ func TestServerRun(t *testing.T) {
 	}
 
 	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/outside-link")
-	resp.Body.Close()
+	closeResource(t, resp.Body, "HTTP response body")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Expected outside symlink status 404, got %d", resp.StatusCode)
 	}
@@ -202,7 +202,7 @@ func TestServerHTTPSWithGeneratedCert(t *testing.T) {
 		},
 	}
 	resp := getWithRetry(t, client, "https://"+address+"/index.html")
-	defer resp.Body.Close()
+	defer closeResource(t, resp.Body, "HTTPS response body")
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
@@ -241,14 +241,14 @@ func TestServerBlocksPrivateKey(t *testing.T) {
 	_, address := startTestServer(t, config, false)
 
 	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/regular.txt")
-	resp.Body.Close()
+	closeResource(t, resp.Body, "HTTP response body")
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected regular file status 200, got %d", resp.StatusCode)
 	}
 
 	for _, file := range []string{"cert.key", "key-alias"} {
 		resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/"+file)
-		resp.Body.Close()
+		closeResource(t, resp.Body, "HTTP response body")
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("Expected %s to return 404, got %d", file, resp.StatusCode)
 		}
@@ -321,6 +321,13 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("failed to reserve a test port: %v", err)
 	}
-	defer listener.Close()
+	defer closeResource(t, listener, "test listener")
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func closeResource(t *testing.T, resource io.Closer, name string) {
+	t.Helper()
+	if err := resource.Close(); err != nil {
+		t.Errorf("failed to close %s: %v", name, err)
+	}
 }
