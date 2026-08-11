@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
@@ -184,6 +185,9 @@ func NewServer(config *Config) (*Server, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s == nil || s.config == nil {
+		return errors.New("server or config is nil")
+	}
 	if ctx == nil {
 		return errors.New("context is nil")
 	}
@@ -206,6 +210,15 @@ func (s *Server) Run(ctx context.Context) error {
 	if !info.IsDir() {
 		return fmt.Errorf("serving path %s is not a directory", rootPath)
 	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return fmt.Errorf("unable to open serving directory %s: %w", rootPath, err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			log.Printf("serving directory close error: %v", err)
+		}
+	}()
 
 	log.Println("Serving", rootPath)
 
@@ -220,7 +233,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
-	baseHandler := http.FileServer(http.Dir(rootPath))
+	// os.Root ensures every file open stays beneath rootPath, including when a
+	// symlink changes between request validation and the actual file open.
+	baseHandler := http.FileServerFS(root.FS())
 	handler := protectedFileHandler(baseHandler, s.blockedFile, rootPath)
 
 	var tlsConfig *tls.Config
@@ -274,6 +289,7 @@ func (s *Server) Run(ctx context.Context) error {
 		log.Printf("HTTPS listening on %s", tlsServer.Addr)
 	}
 	s.setServers(httpServer, tlsServer, tlsConfig)
+	defer s.clearServers()
 
 	serve := func(server *http.Server, listener net.Listener, protocol string) {
 		wg.Add(1)
@@ -319,9 +335,39 @@ func newHTTPServer(addr string, handler http.Handler, tlsConfig *tls.Config) *ht
 	}
 }
 
-func fileExists(path string) bool {
+func fileExists(path string) (bool, error) {
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("%s is a directory", path)
+	}
+	return true, nil
+}
+
+func writeExclusiveFile(path string, data []byte, perm os.FileMode) (err error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(path)
+		}
+	}()
+
+	written, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func canonicalPath(path string) string {
@@ -359,8 +405,14 @@ func (s *Server) loadTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("unable to resolve SSL key path %s: %w", s.config.SSLKey, err)
 	}
 
-	certExists := fileExists(certPath)
-	keyExists := fileExists(keyPath)
+	certExists, err := fileExists(certPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("unable to access SSL certificate %s: %w", certPath, err)
+	}
+	keyExists, err := fileExists(keyPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("unable to access SSL key %s: %w", keyPath, err)
+	}
 	if certExists != keyExists {
 		return nil, fmt.Errorf("SSL certificate and key must both exist (cert: %s, key: %s)", certPath, keyPath)
 	}
@@ -385,10 +437,10 @@ func (s *Server) loadTLSConfig() (*tls.Config, error) {
 	}
 
 	if s.config.SaveKeys {
-		if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+		if err := writeExclusiveFile(certPath, certPEM, 0644); err != nil {
 			return nil, fmt.Errorf("failed to save certificate to %s: %w", certPath, err)
 		}
-		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		if err := writeExclusiveFile(keyPath, keyPEM, 0600); err != nil {
 			return nil, fmt.Errorf("failed to save key to %s: %w", keyPath, err)
 		}
 		log.Printf("Saved certificate to %s", certPath)
@@ -412,6 +464,14 @@ func (s *Server) setServers(httpServer, tlsServer *http.Server, tlsConfig *tls.C
 	s.httpServer = httpServer
 	s.tlsServer = tlsServer
 	s.tlsConfig = tlsConfig
+}
+
+func (s *Server) clearServers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.httpServer = nil
+	s.tlsServer = nil
+	s.tlsConfig = nil
 }
 
 func (s *Server) serverAddress(secure bool) string {
@@ -438,16 +498,22 @@ func (s *Server) Shutdown() {
 	tlsServer := s.tlsServer
 	s.mu.RUnlock()
 
-	if httpServer != nil {
-		if err := httpServer.Shutdown(ctx); err != nil {
-			log.Printf("HTTP server shutdown error: %v", err)
+	var wg sync.WaitGroup
+	shutdown := func(server *http.Server, protocol string) {
+		if server == nil {
+			return
 		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := server.Shutdown(ctx); err != nil {
+				log.Printf("%s server shutdown error: %v", protocol, err)
+			}
+		}()
 	}
-	if tlsServer != nil {
-		if err := tlsServer.Shutdown(ctx); err != nil {
-			log.Printf("HTTPS server shutdown error: %v", err)
-		}
-	}
+	shutdown(httpServer, "HTTP")
+	shutdown(tlsServer, "HTTPS")
+	wg.Wait()
 }
 
 func main() {

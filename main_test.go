@@ -120,6 +120,9 @@ func TestServerRun(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(tmpDir, "outside-link")); err != nil {
 		t.Fatalf("Failed to create outside symlink: %v", err)
 	}
+	if err := os.Symlink("index.html", filepath.Join(tmpDir, "inside-link")); err != nil {
+		t.Fatalf("Failed to create inside symlink: %v", err)
+	}
 
 	config := &Config{
 		Host:    "127.0.0.1",
@@ -142,6 +145,13 @@ func TestServerRun(t *testing.T) {
 	}
 	if string(body) != testContent {
 		t.Errorf("Expected body %q, got %q", testContent, string(body))
+	}
+
+	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/inside-link")
+	defer closeResource(t, resp.Body, "HTTP symlink response body")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("Expected inside symlink status 200, got %d with body %q", resp.StatusCode, body)
 	}
 
 	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/outside-link")
@@ -252,6 +262,46 @@ func TestServerBlocksPrivateKey(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("Expected %s to return 404, got %d", file, resp.StatusCode)
 		}
+	}
+}
+
+func TestLoadTLSConfigRejectsDirectoryPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "cert.crt")
+	keyPath := filepath.Join(tmpDir, "cert.key")
+	if err := os.Mkdir(certPath, 0700); err != nil {
+		t.Fatalf("Failed to create certificate directory: %v", err)
+	}
+	if err := os.Mkdir(keyPath, 0700); err != nil {
+		t.Fatalf("Failed to create key directory: %v", err)
+	}
+
+	server := &Server{config: &Config{SSLCert: certPath, SSLKey: keyPath}}
+	if _, err := server.loadTLSConfig(); err == nil {
+		t.Fatal("loadTLSConfig() accepted directory paths")
+	}
+}
+
+func TestWriteExclusiveFileDoesNotFollowSymlinks(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	path := filepath.Join(tmpDir, "output")
+	if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+		t.Fatalf("Failed to create target file: %v", err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Failed to create output symlink: %v", err)
+	}
+
+	if err := writeExclusiveFile(path, []byte("replacement"), 0600); err == nil {
+		t.Fatal("writeExclusiveFile() followed an existing symlink")
+	}
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("Failed to read target file: %v", err)
+	}
+	if string(contents) != "original" {
+		t.Fatalf("target file changed to %q", contents)
 	}
 }
 
