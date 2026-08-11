@@ -3,6 +3,8 @@ Go Minimal Web Server - Go MWS - Gomoose
 
 ## Installation
 
+Requires Go 1.26 or newer.
+
 ```bash
 go install github.com/bluehexagons/gomoose@latest
 ```
@@ -25,3 +27,5 @@ Run `gomoose -help` for all options.
 ## SSL
 
 HTTPS is enabled by default. If no certificate files exist, a self-signed certificate is generated automatically. Place `cert.crt` and `cert.key` in the working directory or specify paths with `-cert` and `-key`.
+
+Certificate and key paths are resolved from the working directory. Private keys are never served when they are inside the configured content directory.

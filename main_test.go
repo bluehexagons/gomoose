@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,9 +31,9 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestConfigParseFlags(t *testing.T) {
 	tests := []struct {
-		name     string
-		args     []string
-		check    func(*Config) error
+		name  string
+		args  []string
+		check func(*Config) error
 	}{
 		{
 			name: "custom port",
@@ -77,41 +80,56 @@ func TestConfigParseFlags(t *testing.T) {
 	}
 }
 
-func TestServerRun(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "gomoose-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+func TestConfigValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{name: "negative HTTP port", config: Config{Port: -1}},
+		{name: "HTTP port too large", config: Config{Port: 65536}},
+		{name: "negative SSL port", config: Config{SSLPort: -1}},
+		{name: "SSL port too large", config: Config{SSLPort: 65536}},
+		{name: "no servers enabled", config: Config{NoHTTP: true}},
+		{name: "missing certificate path", config: Config{SSLPort: 443, SSLKey: "key"}},
+		{name: "missing key path", config: Config{SSLPort: 443, SSLCert: "cert"}},
 	}
-	defer os.RemoveAll(tmpDir)
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.config.Validate(); err == nil {
+				t.Fatal("Validate() returned nil")
+			}
+		})
+	}
+
+	if err := (*Config)(nil).Validate(); err == nil {
+		t.Fatal("nil config validation returned nil")
+	}
+}
+
+func TestServerRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	outsideDir := t.TempDir()
 	testContent := "Hello, Gomoose!"
 	if err := os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte(testContent), 0644); err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("private"), 0600); err != nil {
+		t.Fatalf("Failed to write outside file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(tmpDir, "outside-link")); err != nil {
+		t.Fatalf("Failed to create outside symlink: %v", err)
+	}
 
-	port := 18080
 	config := &Config{
 		Host:    "127.0.0.1",
-		Port:    port,
+		Port:    0,
 		SSLPort: 0,
 		Dir:     tmpDir,
 	}
+	_, address := startTestServer(t, config, false)
 
-	server, err := NewServer(config)
-	if err != nil {
-		t.Fatalf("NewServer() error = %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = server.Run(ctx) }()
-	time.Sleep(100 * time.Millisecond)
-
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/index.html", port))
-	if err != nil {
-		t.Fatalf("HTTP GET error: %v", err)
-	}
+	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/index.html")
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -124,6 +142,12 @@ func TestServerRun(t *testing.T) {
 	}
 	if string(body) != testContent {
 		t.Errorf("Expected body %q, got %q", testContent, string(body))
+	}
+
+	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/outside-link")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected outside symlink status 404, got %d", resp.StatusCode)
 	}
 }
 
@@ -140,52 +164,44 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
 		t.Fatalf("Failed to parse generated certificate: %v", err)
 	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("generated certificate is not PEM encoded")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("failed to parse generated certificate: %v", err)
+	}
+	if err := cert.VerifyHostname("127.0.0.1"); err != nil {
+		t.Errorf("generated certificate does not cover 127.0.0.1: %v", err)
+	}
 }
 
 func TestServerHTTPSWithGeneratedCert(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "gomoose-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
+	tmpDir := t.TempDir()
 	testContent := "Hello, HTTPS!"
 	if err := os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte(testContent), 0644); err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	sslPort := 18443
 	config := &Config{
-		Host:    "127.0.0.1",
 		SSLHost: "127.0.0.1",
-		SSLPort: sslPort,
+		SSLPort: freePort(t),
 		NoHTTP:  true,
 		Dir:     tmpDir,
-		SSLCert: "nonexistent.crt",
-		SSLKey:  "nonexistent.key",
+		SSLCert: filepath.Join(tmpDir, "nonexistent.crt"),
+		SSLKey:  filepath.Join(tmpDir, "nonexistent.key"),
 	}
-
-	server, err := NewServer(config)
-	if err != nil {
-		t.Fatalf("NewServer() error = %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = server.Run(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	_, address := startTestServer(t, config, true)
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			// The server intentionally uses a generated self-signed certificate.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test-only client
 		},
 	}
-
-	resp, err := client.Get(fmt.Sprintf("https://127.0.0.1:%d/index.html", sslPort))
-	if err != nil {
-		t.Fatalf("HTTPS GET error: %v", err)
-	}
+	resp := getWithRetry(t, client, "https://"+address+"/index.html")
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -194,12 +210,7 @@ func TestServerHTTPSWithGeneratedCert(t *testing.T) {
 }
 
 func TestServerBlocksPrivateKey(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "gomoose-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
+	tmpDir := t.TempDir()
 	certPEM, keyPEM, err := generateSelfSignedCert()
 	if err != nil {
 		t.Fatalf("Failed to generate certs: %v", err)
@@ -215,42 +226,101 @@ func TestServerBlocksPrivateKey(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, "regular.txt"), []byte("content"), 0644); err != nil {
 		t.Fatalf("Failed to write regular file: %v", err)
 	}
+	if err := os.Symlink(keyFile, filepath.Join(tmpDir, "key-alias")); err != nil {
+		t.Fatalf("Failed to create key symlink: %v", err)
+	}
 
-	port := 18084
 	config := &Config{
 		Host:    "127.0.0.1",
-		Port:    port,
-		SSLPort: 18444,
+		Port:    0,
+		SSLPort: freePort(t),
 		Dir:     tmpDir,
 		SSLCert: certFile,
 		SSLKey:  keyFile,
 	}
+	_, address := startTestServer(t, config, false)
 
-	server, err := NewServer(config)
-	if err != nil {
-		t.Fatalf("NewServer() error = %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() { _ = server.Run(ctx) }()
-	time.Sleep(200 * time.Millisecond)
-
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/regular.txt", port))
-	if err != nil {
-		t.Fatalf("HTTP GET error: %v", err)
-	}
+	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/regular.txt")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected regular file status 200, got %d", resp.StatusCode)
 	}
 
-	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/cert.key", port))
+	for _, file := range []string{"cert.key", "key-alias"} {
+		resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/"+file)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("Expected %s to return 404, got %d", file, resp.StatusCode)
+		}
+	}
+}
+
+func startTestServer(t *testing.T, config *Config, secure bool) (*Server, string) {
+	t.Helper()
+	server, err := NewServer(config)
 	if err != nil {
-		t.Fatalf("HTTP GET error: %v", err)
+		t.Fatalf("NewServer() error = %v", err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Expected key file to return 404, got %d", resp.StatusCode)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = server.Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if address := server.serverAddress(secure); address != "" {
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+					if runErr != nil {
+						t.Errorf("server shutdown error: %v", runErr)
+					}
+				case <-time.After(2 * time.Second):
+					server.Shutdown()
+					t.Error("server did not shut down")
+				}
+			})
+			return server, address
+		}
+		select {
+		case <-done:
+			t.Fatalf("server stopped during startup: %v", runErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server did not start listening")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func getWithRetry(t *testing.T, client *http.Client, target string) *http.Response {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(target)
+		if err == nil {
+			return resp
+		}
+		lastErr = err
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("GET %s failed: %v", target, lastErr)
+	return nil
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a test port: %v", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
 }
