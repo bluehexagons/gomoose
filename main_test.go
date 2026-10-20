@@ -131,8 +131,9 @@ func TestServerRun(t *testing.T) {
 		Dir:     tmpDir,
 	}
 	_, address := startTestServer(t, config, false)
+	client := newTestClient(t, nil)
 
-	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/index.html")
+	resp := getWithRetry(t, client, "http://"+address+"/index.html")
 	defer closeResource(t, resp.Body, "HTTP response body")
 
 	if resp.StatusCode != http.StatusOK {
@@ -147,14 +148,14 @@ func TestServerRun(t *testing.T) {
 		t.Errorf("Expected body %q, got %q", testContent, string(body))
 	}
 
-	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/inside-link")
+	resp = getWithRetry(t, client, "http://"+address+"/inside-link")
 	defer closeResource(t, resp.Body, "HTTP symlink response body")
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("Expected inside symlink status 200, got %d with body %q", resp.StatusCode, body)
 	}
 
-	resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/outside-link")
+	resp = getWithRetry(t, client, "http://"+address+"/outside-link")
 	closeResource(t, resp.Body, "HTTP response body")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Expected outside symlink status 404, got %d", resp.StatusCode)
@@ -205,12 +206,8 @@ func TestServerHTTPSWithGeneratedCert(t *testing.T) {
 	}
 	_, address := startTestServer(t, config, true)
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			// The server intentionally uses a generated self-signed certificate.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test-only client
-		},
-	}
+	// The server intentionally uses a generated self-signed certificate.
+	client := newTestClient(t, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test-only client
 	resp := getWithRetry(t, client, "https://"+address+"/index.html")
 	defer closeResource(t, resp.Body, "HTTPS response body")
 
@@ -249,15 +246,16 @@ func TestServerBlocksPrivateKey(t *testing.T) {
 		SSLKey:  keyFile,
 	}
 	_, address := startTestServer(t, config, false)
+	client := newTestClient(t, nil)
 
-	resp := getWithRetry(t, http.DefaultClient, "http://"+address+"/regular.txt")
+	resp := getWithRetry(t, client, "http://"+address+"/regular.txt")
 	closeResource(t, resp.Body, "HTTP response body")
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected regular file status 200, got %d", resp.StatusCode)
 	}
 
 	for _, file := range []string{"cert.key", "key-alias"} {
-		resp = getWithRetry(t, http.DefaultClient, "http://"+address+"/"+file)
+		resp = getWithRetry(t, client, "http://"+address+"/"+file)
 		closeResource(t, resp.Body, "HTTP response body")
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("Expected %s to return 404, got %d", file, resp.StatusCode)
@@ -347,6 +345,15 @@ func startTestServer(t *testing.T, config *Config, secure bool) (*Server, string
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func newTestClient(t *testing.T, tlsConfig *tls.Config) *http.Client {
+	t.Helper()
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	// Register after server startup so idle and speculative connections close
+	// before the server's shutdown cleanup, rather than outliving the test.
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport, Timeout: 2 * time.Second}
 }
 
 func getWithRetry(t *testing.T, client *http.Client, target string) *http.Response {
