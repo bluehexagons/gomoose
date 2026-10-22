@@ -3,7 +3,7 @@ Go Minimal Web Server - Go MWS - Gomoose
 
 ## Installation
 
-Requires Go 1.26 or newer.
+Requires Go 1.27.3 or newer.
 
 ```bash
 go install github.com/bluehexagons/gomoose@latest
@@ -32,7 +32,7 @@ Certificate and key paths are resolved from the working directory. Private keys 
 
 ## Development
 
-Basaltwater on Debian is the reference environment; Go 1.26+ and a C compiler
+Basaltwater on Debian is the reference environment; Go 1.27.3+ and a C compiler
 for race tests are sufficient without Basaltwater. From a checkout:
 
 ```bash
